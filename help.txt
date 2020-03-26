@@ -1,0 +1,1 @@
+https://stackoverflow.com/questions/10469235/opencv-apply-mask-to-a-color-image
