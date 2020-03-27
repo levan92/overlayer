@@ -6,7 +6,7 @@ class XML_reader(object):
         self.doc = xml.dom.minidom.parse(xml_path)
         self.root_dir = root_dir
 
-    def get_polygons(self, target_classes):
+    def get_polygons(self, target_classes=None):
         polygons = []
         for image in self.doc.getElementsByTagName("image"):
             imname = image.getAttribute("name")
@@ -17,7 +17,7 @@ class XML_reader(object):
             print('{},{},{}'.format(imname, imwidth, imheight))
             for polygon in image.getElementsByTagName("polygon"):
                 label = polygon.getAttribute("label")
-                if label not in target_classes:
+                if target_classes and label not in target_classes:
                     continue
                 # if bool(int(polygon.getAttribute("outside"))):
                 #     continue
@@ -26,8 +26,8 @@ class XML_reader(object):
                 for pairs in points_str.split(';'):
                     x, y = pairs.split(',')
                     points.append((int(float(x)), int(float(y))))
-            if len(points) > 0:
-                polygons.append((str(impath), points))
+                if len(points) > 0:
+                    polygons.append((str(impath), points))
         return polygons
 
 if __name__ == '__main__':
