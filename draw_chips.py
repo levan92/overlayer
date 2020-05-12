@@ -37,6 +37,7 @@ def get_valid_zone(boxes, frame_size):
     if len(boxes) > 0:
         horizon = min(boxes, key = lambda x: x[-1])[-1]
         frame_height, frame_width = frame_size
+        horizon = min(horizon, frame_height-1)
         return [ 0, horizon, frame_width-1, frame_height-1 ]    
     else:
         return None
@@ -92,11 +93,11 @@ def paste_chip(chip, bg, point):
 def overlap(bg, bg_boxes, fg_chip, mask, horizon=None):
     valid_zone = get_valid_zone(bg_boxes, bg.shape[:2])
     if valid_zone is None:
-        return None, None
+        return None, 'zone'
     fg_chip, mask = random_resize(fg_chip, mask, range=0.2)
     point = get_random_valid_point(valid_zone, bg_boxes, fg_chip.shape[:2], max_reps=1000)
     if point is None:
-        return None, None
+        return None, 'point'
 
     fg_darkness = np.zeros((bg.shape[0], bg.shape[1], 3), dtype=np.uint8)
     fg, chip_new_coord = paste_chip(fg_chip, fg_darkness, point)
@@ -152,6 +153,9 @@ for f in Path(args.chips).glob('*'):
 
 new_annot_lines = []
 aug_count = 0
+chance_fail = 0
+zone_fail = 0
+pt_fail = 0
 for impath, bbs_and_box_strs in tqdm(impath2bbs.items()):
 # for impath, bbs in impath2bbs.items():
     bbs, box_strs = bbs_and_box_strs
@@ -164,12 +168,19 @@ for impath, bbs_and_box_strs in tqdm(impath2bbs.items()):
     else:
         state = 'og'
         draw_chip, draw_mask = None, None
+        chance_fail += 1
     backdrop = cv2.imread(impath)
     if draw_chip is not None:
         res, chip_new_coord = overlap(backdrop, bbs, draw_chip, draw_mask)
         if res is None:
             res = backdrop
             state = 'og'
+            if chip_new_coord == 'zone':
+                zone_fail += 1
+                chip_new_coord = None
+            elif chip_new_coord == 'point':
+                pt_fail += 1
+                chip_new_coord = None
     else:
         res = backdrop
         chip_new_coord = None
@@ -189,9 +200,13 @@ for impath, bbs_and_box_strs in tqdm(impath2bbs.items()):
     if state=='aug':
         aug_count += 1
 
+print('Original num of images: {}'.format(len(impath2bbs)))
+print('Images augmentation not done due to chance: {}'.format(chance_fail))
+print('Images augmentation failed due to no bbs: {}'.format(zone_fail))
+print('Images augmentation failed not finding valid pt within max rep: {}'.format(pt_fail))
 print('Augmented {} out of {} images'.format(aug_count, len(new_annot_lines)))
 
-augmented_annot_txt = args.dataset_annot.replace('.txt', '_augmented.part.txt')
+augmented_annot_txt = args.dataset_annot.replace('.txt', '_augmented.part')
 with open(augmented_annot_txt, 'w')  as f:
     for l in new_annot_lines:
         f.write(l+'\n')

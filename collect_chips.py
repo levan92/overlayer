@@ -44,3 +44,5 @@ for idx, poly in enumerate(polygon_points):
     mask_path = str( Path(args.out) / mask_name )
     cv2.imwrite( chip_path, chip )
     np.save(mask_path, mask, allow_pickle=False)
+
+    cv2.imwrite('{}_{}_{}.frame.jpg'.format(idx+1, Path(args.xml_file).stem, Path(imgpath).stem), img)

@@ -11,6 +11,7 @@ parser.add_argument('darknet_txt',help='Path to dataset txt file in darknet (aka
 parser.add_argument('--chips',help='Path to dir of chips, defaults to ./out_chips', default='./out_chips')
 parser.add_argument('--chip_class', help='Chip class label idx, defaults to 0', default=0, type=int)
 parser.add_argument('--aug_chance', help='Chance of augmentation, defaults to 0.75', default=0.75, type=float)
+parser.add_argument('--oversample', help='Oversampling factor (int), defaults to 1', default=1, type=int)
 args = parser.parse_args()
 
 def random_resize(img, mask, range=0.2):
@@ -38,11 +39,13 @@ def get_valid_zone(boxes, frame_size):
     if len(boxes) > 0:
         horizon = min(boxes, key = lambda x: x[-1])[-1]
         frame_height, frame_width = frame_size
+        horizon = min(horizon, frame_height-1)
         return [ 0, horizon, frame_width-1, frame_height-1 ]    
     else:
+        # print('No other bbs in this frame, skipping for aug')
         return None
 
-def get_random_valid_point(zone, boxes, size, max_reps=1000):
+def get_random_valid_point(zone, boxes, size, max_reps=100000):
     '''
     zone : ltrb
     boxes : list of ltrb
@@ -64,6 +67,7 @@ def get_random_valid_point(zone, boxes, size, max_reps=1000):
                 break
         else: # no intersection with any box
             return x,y
+    # print('Failed to find a valid point within max reps.')
     return None
 
 def paste_chip(chip, bg, point):
@@ -93,11 +97,12 @@ def paste_chip(chip, bg, point):
 def overlap(bg, bg_boxes, fg_chip, mask, horizon=None):
     valid_zone = get_valid_zone(bg_boxes, bg.shape[:2])
     if valid_zone is None:
-        return None, None
+        return None, 'zone'
+    
     fg_chip, mask = random_resize(fg_chip, mask, range=0.2)
     point = get_random_valid_point(valid_zone, bg_boxes, fg_chip.shape[:2], max_reps=1000)
     if point is None:
-        return None, None
+        return None, 'point'
 
     fg_darkness = np.zeros((bg.shape[0], bg.shape[1], 3), dtype=np.uint8)
     fg, chip_new_coord = paste_chip(fg_chip, fg_darkness, point)
@@ -108,11 +113,17 @@ def overlap(bg, bg_boxes, fg_chip, mask, horizon=None):
     bg = cv2.bitwise_or(bg, bg, mask=bg_mask)
 
     final = cv2.bitwise_or(fg, bg)
+    ## DEBUGGING; TO DELETE
+    # cv2.rectangle(final, (valid_zone[0], valid_zone[1]), (valid_zone[2], valid_zone[3]), color=(0,0,255), thickness=2 )
+    # for box in bg_boxes:
+    #     cv2.rectangle(final, (box[0], box[1]), (box[2], box[3]), color=(255,0,255), thickness=2 )
     return final, chip_new_coord
 
 def coin_flip():
     return bool(random.getrandbits(1))
 
+oversample = int(args.oversample)
+assert oversample > 0
 assert Path(args.darknet_txt).is_file()
 with open(args.darknet_txt,'r') as f:
     lines = f.readlines()
@@ -141,13 +152,17 @@ for line in lines:
         l = int(x - (w+1)/2)
         r = int(x + (w+1)/2)
         t = int(y - (h+1)/2)
-        b = int(y - (h+1)/2)
+        b = int(y + (h+1)/2)
         bbs.append( (int(l),int(t),int(r),int(b)) )
         box_strs.append(box)
     
     impath2bbs[impath] = bbs, box_strs
 
-augmented_root_dir = Path( str(dataset_root)+'_augmented' )
+
+augmented_root_dir_str = str(dataset_root)+'_augmented{:0.2f}'.format(args.aug_chance)
+if oversample > 1:
+    augmented_root_dir_str += '_oversampled{}x'.format(oversample) 
+augmented_root_dir = Path( augmented_root_dir_str )
 augmented_images_dir = augmented_root_dir / 'images'
 augmented_images_dir.mkdir(parents=True, exist_ok=True)
 augmented_labels_dir = augmented_root_dir / 'labels'
@@ -155,7 +170,7 @@ augmented_labels_dir.mkdir(parents=True, exist_ok=True)
 
 og_text_name = Path(args.darknet_txt).name
 
-augmented_list_part_text_path = augmented_root_dir / og_text_name.replace('.txt', '_augmented.part.txt')
+augmented_list_part_text_path = augmented_root_dir / og_text_name.replace('.txt', '_augmented.part')
 augmented_list_text_path = augmented_root_dir / og_text_name.replace('.txt', '_augmented.txt')
 
 assert Path(args.chips).is_dir()
@@ -172,60 +187,78 @@ new_imgstem2annots = {}
 new_imgnames = []
 new_imgpaths = []
 aug_count = 0
-for impath, bbs_and_box_strs in tqdm(impath2bbs.items()):
-# for impath, bbs in impath2bbs.items():
-    bbs, box_strs = bbs_and_box_strs
-    to_augment = ( random.uniform(0, 1) <= args.aug_chance )
-    # to_augment = coin_flip()
-    if to_augment:
-    # if True:
-        state = 'aug'
-        draw_chip, draw_mask = random.choice(chips_masks)
-    else:
-        state = 'og'
-        draw_chip, draw_mask = None, None
-    backdrop = cv2.imread(impath)
-    if draw_chip is not None:
-        res, chip_new_coord = overlap(backdrop, bbs, draw_chip, draw_mask)
-        if res is None:
-            res = backdrop
+chance_fail = 0
+zone_fail = 0
+pt_fail = 0
+for oversample_idx in range(oversample):
+    for impath, bbs_and_box_strs in tqdm(impath2bbs.items()):
+    # for impath, bbs in impath2bbs.items():
+        bbs, box_strs = bbs_and_box_strs
+        to_augment = ( random.uniform(0, 1) <= args.aug_chance )
+        # to_augment = coin_flip()
+        if to_augment:
+        # if True:
+            state = 'aug'
+            draw_chip, draw_mask = random.choice(chips_masks)
+        else:
             state = 'og'
-    else:
-        res = backdrop
-        chip_new_coord = None
-    # cv2.imshow('{}'.format(action), res)
-    # cv2.waitKey(0)
-    new_imgname = '{}_{}{}'.format(Path(impath).stem, state, Path(impath).suffix)
-    new_imgname_stem = '{}_{}'.format(Path(impath).stem, state)
-    newpath = augmented_images_dir / new_imgname
-    cv2.imwrite(str(newpath), res)
+            draw_chip, draw_mask = None, None
+            chance_fail += 1
+        backdrop = cv2.imread(impath)
+        if draw_chip is not None:
+            res, chip_new_coord = overlap(backdrop, bbs, draw_chip, draw_mask)
+            if res is None:
+                res = backdrop
+                state = 'og'
+                if chip_new_coord == 'zone':
+                    zone_fail += 1
+                    chip_new_coord = None
+                elif chip_new_coord == 'point':
+                    pt_fail += 1
+                    chip_new_coord = None
+        else:
+            res = backdrop
+            chip_new_coord = None
+        # cv2.imshow('{}'.format(action), res)
+        # cv2.waitKey(0)
+        os_txt = '_os{}'.format(oversample_idx) if oversample_idx >= 1 else ''
+        new_imgname = '{}_{}{}{}'.format(Path(impath).stem, state, os_txt, Path(impath).suffix)
+        new_imgname_stem = '{}_{}{}'.format(Path(impath).stem, state, os_txt)
+        newpath = augmented_images_dir / new_imgname
+        cv2.imwrite(str(newpath), res)
 
-    out_lines = []
-    for box_str in box_strs:
-        out_lines.append(box_str)
-    if chip_new_coord:
-        l,t,r,b = chip_new_coord
-        ih, iw = res.shape[:2]
+        out_lines = []
+        for box_str in box_strs:
+            out_lines.append(box_str)
+        if chip_new_coord:
+            l,t,r,b = chip_new_coord
+            ih, iw = res.shape[:2]
 
-        w = r - l + 1
-        h = b - t + 1
-        x = l + (w+1)/2
-        y = t + (h+1)/2
+            w = r - l + 1
+            h = b - t + 1
+            x = l + (w+1)/2
+            y = t + (h+1)/2
 
-        x = x / iw
-        y = y / ih
-        w = w / iw
-        h = h / ih
-        out_lines.append('{} {} {} {} {}'.format(args.chip_class, x, y, w, h))
+            x = x / iw
+            y = y / ih
+            w = w / iw
+            h = h / ih
+            out_lines.append('{} {} {} {} {}'.format(args.chip_class, x, y, w, h))
 
-    new_imgstem2annots[new_imgname_stem] = out_lines 
-    new_imgnames.append(new_imgname)
-    new_imgpaths.append(newpath)
+        new_imgstem2annots[new_imgname_stem] = out_lines 
+        new_imgnames.append(new_imgname)
+        new_imgpaths.append(newpath)
 
-    if state=='aug':
-        aug_count += 1
+        if state=='aug':
+            aug_count += 1
 
-print('Augmented {} out of {} images'.format(aug_count, len(new_imgstem2annots.keys())))
+print('Original num of images: {}'.format(len(impath2bbs)))
+if oversample > 1:
+    print('Oversampled by {} times'.format(oversample))
+print('Images augmentation not done due to chance: {}'.format(chance_fail))
+print('Images augmentation failed due to no bbs: {}'.format(zone_fail))
+print('Images augmentation failed not finding valid pt within max rep: {}'.format(pt_fail))
+print('Augmented {} out of {} images'.format(aug_count, len(new_imgstem2annots)))
 
 for new_imgname_stem, annots in new_imgstem2annots.items():
     label_file = augmented_labels_dir / '{}.txt'.format(new_imgname_stem)
@@ -235,7 +268,7 @@ for new_imgname_stem, annots in new_imgstem2annots.items():
 
 with augmented_list_part_text_path.open('w') as f:
     for imgname in new_imgnames:
-        f.write(imgname+'\n')
+        f.write('images/'+imgname+'\n')
 with augmented_list_text_path.open('w') as f:
     for p in new_imgpaths:
         f.write(str(p)+'\n')
